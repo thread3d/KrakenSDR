@@ -33,22 +33,33 @@ krakensdr/
 │   ├── 01-hardware.md         KrakenSDR architecture and USB signatures
 │   ├── 02-host-environment.md what the Xavier's software stack provides and lacks
 │   ├── 03-ogn-rf-integration.md  how ogn-rf could consume the KrakenSDR
-│   └── 04-status-log.md       dated log of what has been tried and learned
+│   ├── 04-status-log.md       dated log of what has been tried and learned
+│   ├── 05-fftw-float-planning.md the startup stall, root-caused
+│   └── 06-rf-verification.md  what is receivable, and what only looks receivable
 └── scripts/
     ├── check-device.sh        is a KrakenSDR actually attached, and how
-    ├── check-env.sh           dump the toolchain / SDR stack / missing build deps
-    └── watch-usb.sh           watch for the device enumerating
+    ├── check-env.sh           dump the toolchain / SDR stack / build deps
+    ├── watch-usb.sh           watch for the device enumerating
+    ├── build-deps.sh          build librtlsdr fork + libconfig, no root
+    ├── iq-smoke-test.c        do all five tuners actually produce IQ
+    ├── spectrum-probe.c       averaged + max-hold spectrum, DC/edge masked
+    ├── analyze-u8.py          find signals in an ogn-rf .u8 capture
+    └── fftw-plan-timing.c     isolate FFTW planning cost
 ```
 
 ## Current state (see [docs/04-status-log.md](docs/04-status-log.md) for the history)
 
 - **The KrakenSDR is attached and working.** All five `0bda:2838` RTL2838 tuners (serials 1000–1004,
   R820T) enumerate behind the board's internal Microchip USB2517 hub, and the RF path is live.
-- **`ogn-rf` now receives on it.** Branch `krakensdr` of
+- **`ogn-rf` now receives real RF on it.** Branch `krakensdr` of
   [`thread3d/ogn-rf`](https://github.com/thread3d/ogn-rf) builds on `aarch64`, opens a tuner at
-  868.300 MHz / 1.000 Msps and acquires valid 8-bit IQ (5,099,640 bytes in 10 s, mean 127.37 about
-  the 128 centre, stddev 9.91). **No OGN signal has been decoded yet** — only IQ acquired — and no
-  antenna is connected.
+  868.300 MHz / 1.000 Msps, and the captures contain genuine signals: strong 868 MHz ISM carriers at
+  868.080 / 868.119 MHz at **57 dB** above the noise floor, confirmed both by direct spectrum
+  measurement *and* inside an `ogn-rf` `.u8` capture. See
+  [docs/06-rf-verification.md](docs/06-rf-verification.md).
+- **No OGN signal yet.** Nothing at the European OGN channels (868.200 / 868.400 MHz) — expected,
+  since OGN carries glider traffic and needs a transponder in range. No decoder is attached to
+  `ogn-rf.fifo` yet either, so slot handoff is the one untested link.
 - Getting there needed one source change: `fft.h` hard-coded `FFTW_MEASURE`, and single-precision
   FFTW planning on this host takes **37 s for 4096 points and 61 s for 32768** (double precision:
   20–40 ms). `ogn-rf` plans three float transforms in global constructors, so it stalled with no

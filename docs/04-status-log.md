@@ -244,3 +244,80 @@ Branch `krakensdr` on `thread3d/ogn-rf`, commit `f0a752c`:
    planning gap suggests the system `libfftw3f3` is badly built, and runtime transforms may be
    suffering the same way.
 
+
+---
+
+## 2026-11-08 — Session 1c: antennas connected, RF verified
+
+Antennas are now fitted (small ones). Re-measured everything with `scripts/spectrum-probe.c`, a new
+tool that keeps **both** an averaged and a **max-hold** spectrum and masks the DC spike and the band
+edges.
+
+### The chain works end to end
+
+Strong carriers found in the 868 MHz ISM band at 868.3 MHz (5 s capture, max gain):
+
+```
+868.0800 MHz   avg 30.0 dB   max-hold 56.8 dB
+868.1185 MHz   avg 28.4 dB   max-hold 57.0 dB
+```
+
+Two tones ~38 kHz apart around 868.10 MHz — the signature of a 2-FSK device on the 868.1 MHz SRD
+channel.
+
+Then the decisive test: run `ogn-rf` itself and analyse the `.u8` file it wrote
+(`scripts/analyze-u8.py`). Same carriers, same frequencies:
+
+```
+868.1186 MHz   26.4 dB avg   51.0 dB max-hold
+868.0803 MHz   26.2 dB avg   50.6 dB max-hold
+```
+
+Antenna → tuner → krakenrf librtlsdr → ogn-rf → capture file, all carrying real RF.
+
+FM broadcast is receivable too — a clean 31 dB carrier at 103.000 MHz — but only if you go looking
+for it properly, because a small antenna is very inefficient at 100 MHz.
+
+### No OGN
+
+Nothing at 868.200 or 868.400 MHz, the two European OGN channels. That is expected: OGN carries
+glider traffic and there needs to be a transponder in range. Not a hardware fault.
+
+### Three artefacts that cost most of the session
+
+All three present as convincing "signals":
+
+1. **DC/LO spike at the tuned frequency**, 20–30 dB above the floor. "Found" a 30 dB carrier at
+   103.008 MHz that was nothing. Exclude ±25 kHz.
+2. **Band-edge artefact at −983 kHz** (at 2.048 Msps). It appeared at 432.937, 867.317, 868.267 and
+   1089.017 MHz and looked like a signal present everywhere. The test that settles it: retune.
+   Tuning 1090.0 → 1090.5 → 1091.0 moved it 1089.017 → 1089.517 → 1090.017, i.e. it kept a fixed
+   **offset**, not a fixed **frequency**. An artefact. **This retune test is the general way to
+   tell a real carrier from a receiver artefact.** Mask the outer 5%.
+3. **Averaging hides bursts.** OGN, ADS-B and ISM traffic is bursty; averaging 64 frames divides a
+   burst by 64. The 57 dB ISM carriers were invisible in an averaged-only measurement. Keep a
+   max-hold spectrum and capture for **seconds**, not 128 ms.
+
+### Gain sanity check
+
+Noise floor versus requested gain at 223 MHz: 0 dB → −13.89, 19.7 → −12.70, 32.8 → −3.19,
+42.1 → +3.95, 49.6 → +10.34. Monotonic over ~24 dB; the LNA is fine.
+
+### Important consequence for the OGN config
+
+The strong ISM carriers were measured at **maximum gain**. That is far too hot — with an 868.1 MHz
+transmitter nearby it desensitises the tuner, and the ~10 dB "grass" seen across the band is partly
+that. `RF.OGN.Gain` is in tenths of dB, so the `400` (40.0 dB) currently in the test config should
+come down to roughly 200–300 before judging OGN reception.
+
+### Added
+
+- `scripts/spectrum-probe.c` — averaged + max-hold spectrum with DC and edge masking
+- `scripts/analyze-u8.py` — the same analysis over an `ogn-rf` capture
+- `docs/06-rf-verification.md` — the full write-up, including the retune test
+
+### Next actions
+
+1. Re-run the OGN capture at 200–300 (20–30 dB) gain, 868.200 and 868.400, for several minutes.
+2. Attach a consumer to `ogn-rf.fifo` and confirm slot handoff — still the untested link.
+3. Multi-channel work per [03-ogn-rf-integration.md](03-ogn-rf-integration.md).
