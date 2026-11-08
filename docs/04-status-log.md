@@ -321,3 +321,90 @@ come down to roughly 200–300 before judging OGN reception.
 1. Re-run the OGN capture at 200–300 (20–30 dB) gain, 868.200 and 868.400, for several minutes.
 2. Attach a consumer to `ogn-rf.fifo` and confirm slot handoff — still the untested link.
 3. Multi-channel work per [03-ogn-rf-integration.md](03-ogn-rf-integration.md).
+
+---
+
+## 2026-11-08 — Session 1d: how many tuners are actually in use
+
+Fair question, and the answer was uncomfortable: **every measurement up to this point used exactly
+one tuner** (serial `1000`). The IQ smoke test opened all five but *sequentially*, one device handle
+at a time, so it proved each channel works individually and nothing about the array running at once.
+
+`scripts/multi-tuner-test.c` was written to fix that — it opens all five by serial, gives each its
+own thread and stream, and reports per-channel throughput, power and strongest carrier.
+
+### Result: the array streams, but not in one process
+
+| Configuration | Outcome |
+|---|---|
+| 5 separate `ogn-rf` processes, one tuner each, via the **krakenrf fork** | **works** — all five opened distinct tuners, all produced full captures |
+| 5 concurrent in-process streams, stock `librtlsdr 0.6.0` + SoapySDR | **flaky** — 1 and 4 tuners fine, 2/3/5 segfault |
+| 5 concurrent in-process streams, krakenrf fork + stock SoapySDR module | **SIGABRT** — ABI mismatch |
+
+The working configuration, all five at once:
+
+```
+S1000 → RTLSDR::Open(1,868300000,1000000)   S1001 → RTLSDR::Open(2,...)
+S1002 → RTLSDR::Open(3,...)                 S1003 → RTLSDR::Open(4,...)
+S1004 → RTLSDR::Open(0,...)
+```
+
+Five `.u8` captures, 5,099,640 bytes each, each on a different tuner. Note the index mapping again —
+serial `1004` is device index **0**.
+
+### Why the in-process path fails
+
+Two separate problems, both instructive:
+
+1. **Stock `librtlsdr 0.6.0` is not reliable for five simultaneous streams.** The failure is
+   intermittent and non-monotonic (1 and 4 tuners fine, 2/3/5 crashed), with
+   `Failed to allocate zero-copy buffer for transfer 3` in the log. When it does work the
+   throughput is perfect — 4 tuners each delivered exactly 2,048,000 samples over 2 s, 0.0 % spread
+   across channels — so this is a resource/race problem, not a bandwidth limit. 10.2 MB/s over the
+   shared USB 2.0 hub is well inside budget.
+2. **The krakenrf fork cannot be swapped in underneath SoapySDR.** `libtlsdrSupport.so` in
+   `/usr/lib/aarch64-linux-gnu/SoapySDR/modules0.7/` is built against `librtlsdr.so.0` 0.6.0;
+   forcing the 0.8git fork via `LD_LIBRARY_PATH` aborts with SIGABRT after
+   `Allocating 15 (non-zero-copy) user-space buffers`.
+
+**This is precisely why KrakenSDR ships HeIMDALL.** Driving five coherent streams is not something
+to do ad-hoc through `librtlsdr`; the vendor daemon exists to own the devices, start them in lockstep
+and publish frames. The multi-process workaround above is fine for independent-channel reception
+(one tuner per frequency), but it cannot give phase coherence.
+
+### Correction: the ISM carrier is intermittent
+
+The 868.080 / 868.1185 MHz pair is **not continuously present**. Earlier notes called it
+"reproducible", which was true only across retunes taken minutes apart — over time it comes and goes:
+
+- 10 s window, max-hold: **58.8 dB** and 57.1 dB — unmistakably there
+- 5 s window, same settings: 57 dB — there
+- 2.55 s windows (the 3 slots an `ogn-rf` run with `SaveRawData = 3` captures): **missed entirely**
+
+So capture duration, not sensitivity, decided whether it was seen. That matters for OGN too: an
+850 ms OGN slot is a short capture, and absence of a signal in one slot proves very little.
+
+### A test-harness bug worth remembering
+
+The first multi-tuner run reported `open failed` for four of five tuners. That was not the hardware —
+it was **five threads each calling `SoapySDRDevice_make()` concurrently**. `librtlsdr` enumerates the
+USB bus on every open and that is not thread-safe. Opening must be serialised; only *streaming* needs
+to be parallel. The tool now does a serial open phase, a parallel stream phase, then teardown.
+
+Two other self-inflicted delays in the same session, both already documented but worth repeating
+because they cost real time: `printf` output is block-buffered so a crash discards everything printed
+(fixed with `setvbuf(stdout, NULL, _IOLBF, 0)`), and it is easy to "find" the DC spike.
+
+### Added
+
+- `scripts/multi-tuner-test.c` — open N tuners (1–5) and stream them concurrently
+
+### Next actions
+
+1. Decide the architecture: multi-process per tuner (works today) versus HeIMDALL (needed for
+   coherent DoA). [03-ogn-rf-integration.md](03-ogn-rf-integration.md) argues for doing both, in
+   phases.
+2. Re-check the `-983 kHz` band-edge artefact and the DC spike handling in `multi-tuner-test.c` —
+   it currently reports the strongest bin without masking edges as carefully as `spectrum-probe`.
+3. Try HeIMDALL on the Xavier. It is the only path to coherent multi-channel, and the Xavier should
+   be far more capable than the Pi 4 it targets.

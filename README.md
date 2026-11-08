@@ -44,6 +44,7 @@ krakensdr/
     ├── iq-smoke-test.c        do all five tuners actually produce IQ
     ├── spectrum-probe.c       averaged + max-hold spectrum, DC/edge masked
     ├── analyze-u8.py          find signals in an ogn-rf .u8 capture
+    ├── multi-tuner-test.c     stream 1-5 tuners concurrently, one thread each
     └── fftw-plan-timing.c     isolate FFTW planning cost
 ```
 
