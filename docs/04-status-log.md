@@ -123,3 +123,124 @@ receiver than the single-dongle original.
    ISM band is the easiest thing to see.
 5. Evaluate running HeIMDALL on the Xavier: its documented target is a Pi 4, and the Xavier is far
    stronger, but Python 3.8 and the conda-based install are both friction points.
+
+---
+
+## 2026-11-08 — Session 1b: dependencies, ogn-rf build, and the startup stall
+
+### Dependencies built without root
+
+`sudo` needs a password, so `apt install librtlsdr-dev libconfig-dev` was not an option. Worse, the
+packaged `librtlsdr0 0.6.0` lacks the two fork-only symbols HeIMDALL needs, so the krakenrf fork was
+required anyway.
+
+`scripts/build-deps.sh` cloned and installed both into `deps/prefix` with no root:
+
+```
+librtlsdr (krakenrf fork) : built and installed
+libconfig                 : built and installed (cmake)
+symbol rtlsdr_set_dithering                : present
+symbol rtlsdr_set_sample_freq_correction_f : present
+```
+
+That removes the packaging blocker entirely. `sudo` is still the cleaner long-term answer for
+`libjpeg`/`fftw` but is no longer required.
+
+### ogn-rf builds and runs on aarch64
+
+`ogn-rf` compiled cleanly against the local prefix (warnings only, all pre-existing) and links the
+krakenrf fork via rpath. A trivial program confirmed the fork sees all five tuners:
+
+```
+TRIVIAL: rtlsdr_get_device_count = 5
+```
+
+### The "hang" that was actually FFTW planning
+
+Running `ogn-rf` looked like a hard deadlock: **100 % of one core, single-threaded, in user space,
+no output at all**, no USB device opened, acquisition thread never created — for over three minutes,
+with `utime` tracking wall time one-for-one.
+
+It was not a deadlock. `fft.h` requested `FFTW_MEASURE`, and on this host **single-precision** FFTW
+planning is pathologically slow:
+
+| transform | points | `FFTW_MEASURE` plan time |
+|---|---|---|
+| float (`fftwf`) | 4 096 | **37.144 s** |
+| float (`fftwf`) | 32 768 | **60.858 s** |
+| double (`fftw`) | 4 096 | 0.022 s |
+| double (`fftw`) | 32 768 | 0.038 s |
+
+A ~1 700× gap between two transforms of the same size in the same library. `ogn-rf` plans three
+float transforms **in global constructors, before `main()`**, so it spends well over 100 s inside
+`fftwf_plan_dft_1d` before printing anything. Because nothing is logged, it reads as a crash.
+
+Full analysis, reproduction and four candidate fixes: [05-fftw-float-planning.md](05-fftw-float-planning.md).
+Reproduce with `scripts/fftw-plan-timing.c`.
+
+### Result: OGN reception works on the KrakenSDR
+
+With `FFTW_ESTIMATE` (now the branch default, overridable via `-DFFTW_PLAN_FLAG`), `ogn-rf` opens a
+tuner immediately and acquires real OGN slots:
+
+```
+RTLSDR::Open(1,868300000,1000000) => Generic RTL2832U OEM,  868.300 MHz, 1.000 Msps
+HTTP_Server.Exec() ... Listening on port 8080
+```
+
+Capture verified — 10 s of acquisition produced `TEST0_2026.11.08.u8`:
+
+```
+bytes            5,099,640
+min/max          0 / 255
+mean             127.37   (128 = zero I/Q, so no DC offset)
+stddev           9.91
+distinct values  256
+>3 from centre   63.2 %
+```
+
+That is a healthy Gaussian IQ distribution — live noise and signal, not zeros and not a stuck ADC.
+
+Note it opened **device index 1** for serial `1000`, confirming the enumeration-order trap
+documented in [01-hardware.md](01-hardware.md).
+
+The `Half time slot` / `Dropped a slot` messages in that run are expected: nothing was draining
+`ogn-rf`'s output FIFO, so `OutQueue` backed up. They are not a defect.
+
+### Two runtime traps worth recording
+
+Both made a working program look broken:
+
+1. **stdin at EOF kills it.** `main()` loops on `fgets(stdin)`; on EOF it breaks, sleeps 4 s and
+   exits having done nothing. Under `nohup`, a script, or a service manager this is exactly what
+   happens. It needs `sleep infinity | ogn-rf ...` or a pty.
+2. **Block-buffered stdout hides everything.** `printf` to a pipe is buffered, so `timeout`-killing
+   the process discards its output entirely. Use `stdbuf -oL -eL` or a file.
+
+Also: **ptrace is blocked** on this host (`/proc/sys/kernel/yama/ptrace_scope`), so `gdb -p` cannot
+attach and stack-trace a stuck process. Working around that cost real time; the instrumented-copy
+technique (insert `fprintf(stderr, ...)` at known anchors, rebuild in `/tmp`) is the practical
+substitute.
+
+### Committed
+
+Branch `krakensdr` on `thread3d/ogn-rf`, commit `f0a752c`:
+
+- `fft.h` — `FFTW_MEASURE` → overridable `FFTW_PLAN_FLAG`, defaulting to `FFTW_ESTIMATE`
+- `docs/krakensdr.md` — verified config, build and run commands, the FFTW analysis, the two traps
+
+### Next actions
+
+1. **FFTW wisdom caching** for `ogn-rf`: keep the (faster) measured plans but persist them, so the
+   cost is paid once instead of every start. This is the proper fix behind the `FFTW_PLAN_FLAG` stopgap.
+2. **Move FFT plan creation out of global constructors** into `main()` after configuration, so a slow
+   plan is at least visible in the logs instead of silent.
+3. **Attach a decoder** (`ogn-decode`, or any consumer of `ogn-rf.fifo`) and confirm end-to-end slot
+   handoff, which is the first test that exercises the 0.375 s slot alignment properly.
+4. **Connect an antenna.** No real OGN signal has been decoded yet — only IQ acquired.
+5. Then the multi-channel work: the HeIMDALL source adapter and, for USA/Australia, Independent mode
+   across the five tuners (see [03-ogn-rf-integration.md](03-ogn-rf-integration.md)).
+6. Consider building FFTW from source for `aarch64` with NEON enabled — a 1 700× float/double
+   planning gap suggests the system `libfftw3f3` is badly built, and runtime transforms may be
+   suffering the same way.
+

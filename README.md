@@ -42,20 +42,23 @@ krakensdr/
 
 ## Current state (see [docs/04-status-log.md](docs/04-status-log.md) for the history)
 
-- **The KrakenSDR is attached and its five receive chains are up.** All five `0bda:2838` RTL2838
-  tuners (serials 1000–1004, R820T) enumerate behind the board's internal Microchip USB2517 hub.
-  The RF path is confirmed live: output power scales with gain and the five channels differ from
-  each other. **No real signal has been received yet** — there is no antenna connected and the
-  antenna switch matrix is undriven, which is HeIMDALL's job.
+- **The KrakenSDR is attached and working.** All five `0bda:2838` RTL2838 tuners (serials 1000–1004,
+  R820T) enumerate behind the board's internal Microchip USB2517 hub, and the RF path is live.
+- **`ogn-rf` now receives on it.** Branch `krakensdr` of
+  [`thread3d/ogn-rf`](https://github.com/thread3d/ogn-rf) builds on `aarch64`, opens a tuner at
+  868.300 MHz / 1.000 Msps and acquires valid 8-bit IQ (5,099,640 bytes in 10 s, mean 127.37 about
+  the 128 centre, stddev 9.91). **No OGN signal has been decoded yet** — only IQ acquired — and no
+  antenna is connected.
+- Getting there needed one source change: `fft.h` hard-coded `FFTW_MEASURE`, and single-precision
+  FFTW planning on this host takes **37 s for 4096 points and 61 s for 32768** (double precision:
+  20–40 ms). `ogn-rf` plans three float transforms in global constructors, so it stalled with no
+  output at all for minutes before `main()`. See
+  [docs/05-fftw-float-planning.md](docs/05-fftw-float-planning.md).
+- Dependencies (`librtlsdr` from the krakenrf fork, and `libconfig`) are built into `deps/prefix`
+  with no root by `scripts/build-deps.sh`; the packaged `librtlsdr0 0.6.0` is unusable for HeIMDALL.
+  See [docs/02-host-environment.md](docs/02-host-environment.md).
 - There is **no CP210x serial bridge**, and that is correct for this board: the noise source is
   switched over the RTL2832U GPIOs. See [docs/01-hardware.md](docs/01-hardware.md).
-- `../KrakenSDR/krakensdr` was an empty directory; this repository now owns it.
-- The host SDR stack is present but partial: SoapySDR 0.7.2 with an rtlsdr module, but the packaged
-  `librtlsdr0 0.6.0-3` lacks `rtlsdr_set_dithering` and `rtlsdr_set_sample_freq_correction_f`, so
-  **HeIMDALL cannot build against it** and needs the krakenrf fork. `librtlsdr-dev` and
-  `libconfig-dev` are also missing, and `sudo` requires a password — so neither HeIMDALL nor
-  `ogn-rf` can be built by `apt install` without help. See
-  [docs/02-host-environment.md](docs/02-host-environment.md).
 
 ## Quick start
 
