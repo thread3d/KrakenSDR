@@ -1,0 +1,37 @@
+# Build products and local state
+
+# Compiled helper binaries
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local build/install prefixes (dependencies built without sudo)
+/prefix/
+/deps/
+/build/
+
+# Runtime / capture artifacts
+*.iq
+*.raw
+*.wav
+*.log
+logs/
+
+# Editor & OS noise
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Local overrides
+*.local
+.env
