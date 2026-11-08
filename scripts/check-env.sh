@@ -92,6 +92,48 @@ for lib in libconfig fftw3 fftw3f jpeg pthread rt; do
   fi
 done
 
+head1 "local dependency prefix"
+# scripts/build-deps.sh installs librtlsdr (krakenrf fork) and libconfig here,
+# which is what makes ogn-rf buildable despite the missing system dev packages.
+LOCAL_PREFIX="$(cd "$(dirname "$0")/.." && pwd)/deps/prefix"
+prefix_ok=0
+if [ -d "$LOCAL_PREFIX" ]; then
+  for h in rtl-sdr.h libconfig.h; do
+    if [ -f "$LOCAL_PREFIX/include/$h" ]; then
+      ok "prefix $h" "$LOCAL_PREFIX/include/$h"
+    else
+      bad "prefix $h" "MISSING under $LOCAL_PREFIX"
+      prefix_ok=1
+    fi
+  done
+  for lib in librtlsdr libconfig; do
+    if ls "$LOCAL_PREFIX"/lib*/"$lib".so* >/dev/null 2>&1; then
+      ok "prefix $lib" "present"
+    else
+      bad "prefix $lib" "MISSING"
+      prefix_ok=1
+    fi
+  done
+  # The fork-specific symbols are the whole reason for building it.
+  if lib=$(ls "$LOCAL_PREFIX"/lib*/librtlsdr.so* 2>/dev/null | head -1); then
+    for sym in rtlsdr_set_dithering rtlsdr_set_sample_freq_correction_f; do
+      if nm -D --defined-only "$lib" 2>/dev/null | grep -qw "$sym"; then
+        ok "fork symbol $sym" "present"
+      else
+        bad "fork symbol $sym" "absent -- not the krakenrf fork?"
+        prefix_ok=1
+      fi
+    done
+  fi
+  if [ "$prefix_ok" -eq 0 ]; then
+    inf "build with" "FLAGS=-I$LOCAL_PREFIX/include LIBS=-L$LOCAL_PREFIX/lib -Wl,-rpath,$LOCAL_PREFIX/lib ..."
+    ognf_missing=0
+  fi
+else
+  inf "prefix" "$LOCAL_PREFIX (not built yet)"
+  inf "build it with" "scripts/build-deps.sh"
+fi
+
 head1 "GPU / FFT"
 if have nvidia-smi; then
   inf "nvidia-smi" "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
@@ -127,7 +169,13 @@ if [ "$ognf_missing" -ne 0 ]; then
   echo "    a) ask for the sudo password once:"
   echo "         sudo apt install librtlsdr-dev libconfig-dev"
   echo "    b) build them into a local prefix with no root (see docs/03):"
-  echo "         scripts/build-deps.sh <prefix>"
+  echo "         scripts/build-deps.sh"
+  echo
+  echo "  Note (b) is needed regardless for HeIMDALL: the packaged librtlsdr 0.6.0"
+  echo "  lacks rtlsdr_set_dithering and rtlsdr_set_sample_freq_correction_f."
+  echo
+else
+  echo "  ogn-rf IS buildable here (system headers or local prefix satisfied)."
   echo
 fi
 if [ "$missing" -ne 0 ]; then
